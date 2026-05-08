@@ -1,0 +1,3 @@
+[submodule "dkey-lib"]
+	path = dkey-lib
+	url = git@github.com:0x-noad/dkey-lib.git
