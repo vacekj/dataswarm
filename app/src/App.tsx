@@ -87,6 +87,55 @@ type RegistryEntry = {
   createdAt: number
 }
 
+type ListingMetadataJSON = {
+  seller?: Record<string, unknown>
+  fileName?: string
+  fileDescription?: string
+  fileSizeInBytes?: number
+  suggestedPriceInEth?: number
+  coverPhotoReference?: string
+  coverPhotoLink?: string
+  chainIds?: number[]
+  listingCreatedAfterBlock?: number
+  content?: {
+    encryptedPath?: string
+    originalType?: string
+  }
+}
+
+type ListingDetails = {
+  howManyDKeysForSale: number
+  howManyDKeysSold: number
+  priceInEth: number
+  royaltyPercentage: number
+  listingOwnerAddress: Address
+  canDkeysBeSold: boolean
+  openBidsCounter: number
+  referenceString: string
+  fileName: string
+  description: string
+  fileSizeInBytes?: number
+  seller: Record<string, unknown>
+  coverPhotoLink: string
+  coverPhotoReference: string
+  chainIds: number[]
+  chainId: number
+  listingCreatedAfterBlock: number
+  totalBidsPlaced: number
+}
+
+type OperationState = {
+  key: string
+  title: string
+  detail: string
+  progress: number
+}
+
+type Route =
+  | { name: 'profile' }
+  | { name: 'create' }
+  | { name: 'listing'; reference: string }
+
 const BASE_CHAIN_ID = 8453
 const BASE_CHAIN_HEX = '0x2105'
 const REGISTRY_FEED = 'dkey-swarm-demo-registry'
@@ -94,12 +143,22 @@ const ACTIVITY_FEED = 'dkey-swarm-demo-activity'
 const ACTIVITY_STORAGE_KEY = 'dkey.swarm.activity.v1'
 const REGISTRY_STORAGE_KEY = 'dkey.swarm.registry.v1'
 const PROFILE_STORAGE_KEY = 'dkey.swarm.profile.v1'
-const SAMPLE_PAYLOAD = {
+const DEFAULT_BID_AMOUNT = '0.0001'
+
+const baseChainParams = {
+  chainId: BASE_CHAIN_HEX,
+  chainName: 'Base',
+  nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
+  rpcUrls: ['https://mainnet.base.org'],
+  blockExplorerUrls: ['https://basescan.org'],
+}
+
+const samplePayload = {
   title: 'DKey Swarm Hackathon Sample',
   rows: [
     { metric: 'swarm_reference_model', value: 'manifest-directory' },
     { metric: 'chain', value: 'base-mainnet' },
-    { metric: 'tracking', value: 'local-ledger-and-swarm-feed' },
+    { metric: 'routing', value: 'static-spa-hash-router' },
   ],
   createdAt: '2026-05-08T00:00:00.000Z',
 }
@@ -115,12 +174,11 @@ const short = (value?: string) => {
   return value.length > 18 ? `${value.slice(0, 10)}...${value.slice(-6)}` : value
 }
 
-const baseChainParams = {
-  chainId: BASE_CHAIN_HEX,
-  chainName: 'Base',
-  nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
-  rpcUrls: ['https://mainnet.base.org'],
-  blockExplorerUrls: ['https://basescan.org'],
+const formatBytes = (bytes?: number) => {
+  if (!bytes || bytes <= 0) return '0 B'
+  const units = ['B', 'KB', 'MB', 'GB']
+  const index = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1)
+  return `${(bytes / 1024 ** index).toFixed(index === 0 ? 0 : 1)} ${units[index]}`
 }
 
 const makeActivity = (kind: ActivityKind, label: string, detail: string, extra: Partial<ActivityEntry> = {}): ActivityEntry => ({
@@ -146,11 +204,68 @@ const decodeFeedJSON = <T,>(entry: { data: string }) => {
   return JSON.parse(new TextDecoder().decode(bytes)) as T
 }
 
-const fetchBzzBytes = async (bzzUrl: string, path: string) => {
+const routeFromHash = (): Route => {
+  const path = window.location.hash.replace(/^#/, '') || '/profile'
+  const listingMatch = path.match(/^\/listings\/([^/]+)$/)
+  if (listingMatch) return { name: 'listing', reference: decodeURIComponent(listingMatch[1]) }
+  if (path === '/listings/new') return { name: 'create' }
+  return { name: 'profile' }
+}
+
+const navigate = (path: string) => {
+  window.location.hash = path
+}
+
+const bzzUrlForReference = (reference: string) => dkey.formatSwarmReference(reference).bzzUrl
+
+const normalizeReference = (reference: string) => dkey.formatSwarmReference(reference).normalizedReference
+
+const tryNormalizeReference = (reference: string) => {
+  try {
+    return normalizeReference(reference)
+  } catch {
+    return reference
+  }
+}
+
+const tryBzzUrlForReference = (reference: string) => {
+  try {
+    return bzzUrlForReference(reference)
+  } catch {
+    return ''
+  }
+}
+
+const fetchBzzBytes = async (bzzUrl: string, path: string, onProgress?: (progress: number) => void) => {
   const url = `${bzzUrl.replace(/\/$/, '')}/${path}`
   const response = await fetch(url)
   if (!response.ok) throw new Error(`Failed to fetch ${path}: ${response.status}`)
-  return new Uint8Array(await response.arrayBuffer())
+
+  const contentLength = Number(response.headers.get('content-length') ?? 0)
+  if (!response.body || !contentLength) {
+    const bytes = new Uint8Array(await response.arrayBuffer())
+    onProgress?.(100)
+    return bytes
+  }
+
+  const reader = response.body.getReader()
+  const chunks: Uint8Array[] = []
+  let received = 0
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    chunks.push(value)
+    received += value.length
+    onProgress?.(Math.min(100, Math.round((received / contentLength) * 100)))
+  }
+
+  const bytes = new Uint8Array(received)
+  let offset = 0
+  chunks.forEach(chunk => {
+    bytes.set(chunk, offset)
+    offset += chunk.length
+  })
+  return bytes
 }
 
 const fetchBzzJSON = async <T,>(bzzUrl: string, path: string) => {
@@ -158,43 +273,85 @@ const fetchBzzJSON = async <T,>(bzzUrl: string, path: string) => {
   return JSON.parse(new TextDecoder().decode(bytes)) as T
 }
 
+const metadataFromJSON = (raw: ListingMetadataJSON) => {
+  const chainIds = raw.chainIds?.length ? raw.chainIds : [BASE_CHAIN_ID]
+  return new ListingMetadata(
+    raw.seller ?? {},
+    raw.fileName || 'Encrypted data',
+    raw.fileDescription || '',
+    Number(raw.fileSizeInBytes ?? 0),
+    Number(raw.suggestedPriceInEth ?? 0),
+    raw.coverPhotoReference || '',
+    raw.coverPhotoLink || '',
+    chainIds,
+    Number(raw.listingCreatedAfterBlock ?? dkey.contracts.DKeyStoreL2[BASE_CHAIN_ID].deploymentBlockNumber),
+  )
+}
+
+const registryEntryFromMetadata = (reference: string, bzzUrl: string, raw: ListingMetadataJSON): RegistryEntry => {
+  const sellerAddress = typeof raw.seller?.address === 'string' ? raw.seller.address : ''
+  return {
+    id: `${raw.chainIds?.[0] ?? BASE_CHAIN_ID}:${reference}`,
+    swarmReference: reference,
+    bzzUrl,
+    fileName: raw.fileName || 'Encrypted data',
+    fileDescription: raw.fileDescription || '',
+    fileSizeInBytes: Number(raw.fileSizeInBytes ?? 0),
+    suggestedPriceInEth: Number(raw.suggestedPriceInEth ?? 0),
+    chainId: raw.chainIds?.[0] ?? BASE_CHAIN_ID,
+    contractAddress: dkey.contracts.DKeyStoreL2[BASE_CHAIN_ID].address,
+    sellerAddress,
+    listingTxHash: '',
+    listingBlockNumber: String(raw.listingCreatedAfterBlock ?? 0),
+    createdAt: Date.now(),
+  }
+}
+
+const coverUrlForMetadata = (metadata: ListingMetadataJSON | null, listingBzzUrl: string) => {
+  if (!metadata) return ''
+  if (metadata.coverPhotoLink) {
+    if (/^(https?:|bzz:)/.test(metadata.coverPhotoLink)) return metadata.coverPhotoLink
+    return `${listingBzzUrl.replace(/\/$/, '')}/${metadata.coverPhotoLink.replace(/^\//, '')}`
+  }
+  if (metadata.coverPhotoReference) return tryBzzUrlForReference(metadata.coverPhotoReference)
+  return ''
+}
+
+const downloadBytes = (bytes: Uint8Array, fileName: string, type = 'application/octet-stream') => {
+  const blob = new Blob([bytes.slice()], { type })
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = fileName
+  link.click()
+  URL.revokeObjectURL(url)
+}
+
+const profileEntries = <T,>(record: Record<number, Record<string, T>>, chainId = BASE_CHAIN_ID) => Object.entries(record[chainId] ?? {})
+
+const buildConfig = () => createConfig({
+  chains: [base],
+  connectors: [
+    injected({
+      target: () => ({
+        id: 'freedom',
+        name: 'Freedom Wallet',
+        provider: window.ethereum as never,
+      }),
+    }),
+  ],
+  multiInjectedProviderDiscovery: false,
+  transports: {
+    [base.id]: http('https://mainnet.base.org'),
+  },
+})
+
 function App() {
+  const config = useMemo(() => buildConfig(), [])
+  const [route, setRoute] = useState<Route>(() => routeFromHash())
   const [activity, setActivity] = useState<ActivityEntry[]>(() => loadJSON(ACTIVITY_STORAGE_KEY, []))
   const [registry, setRegistry] = useState<RegistryEntry[]>(() => loadJSON(REGISTRY_STORAGE_KEY, []))
-  const [address, setAddress] = useState<Address | null>(null)
-  const [swarmReady, setSwarmReady] = useState(false)
-  const [walletReady, setWalletReady] = useState(false)
-  const [feedReady, setFeedReady] = useState(false)
-  const [busy, setBusy] = useState<string | null>(null)
-  const [selectedFile, setSelectedFile] = useState<File | null>(null)
-  const [description, setDescription] = useState('Encrypted data drop')
-  const [price, setPrice] = useState('0.0001')
-  const [maxKeys, setMaxKeys] = useState('3')
-  const [royalty, setRoyalty] = useState('5')
-  const [manualReference, setManualReference] = useState('')
-  const [bidAmount, setBidAmount] = useState('0.0001')
-  const [selectedListingId, setSelectedListingId] = useState<string | null>(null)
-  const [openBids, setOpenBids] = useState<BidLite[]>([])
-  const [lastUploadStatus, setLastUploadStatus] = useState<UploadStatus | null>(null)
-
-  const config = useMemo(() => createConfig({
-    chains: [base],
-    connectors: [
-      injected({
-        target: () => ({
-          id: 'freedom',
-          name: 'Freedom Wallet',
-          provider: window.ethereum as never,
-        }),
-      }),
-    ],
-    multiInjectedProviderDiscovery: false,
-    transports: {
-      [base.id]: http('https://mainnet.base.org'),
-    },
-  }), [])
-
-  const profile = useMemo(() => {
+  const [profile, setProfile] = useState(() => {
     const serialized = localStorage.getItem(PROFILE_STORAGE_KEY)
     if (serialized) {
       try {
@@ -203,16 +360,43 @@ function App() {
         localStorage.removeItem(PROFILE_STORAGE_KEY)
       }
     }
-    return new DkeyUserProfile({ app: 'dkey-swarm-demo' }, {}, {}, {}, {}, config)
-  }, [config])
+    return new DkeyUserProfile({ app: 'dkey-swarm' }, {}, {}, {}, {}, config)
+  })
+  const [address, setAddress] = useState<Address | null>(null)
+  const [swarmReady, setSwarmReady] = useState(false)
+  const [walletReady, setWalletReady] = useState(false)
+  const [feedReady, setFeedReady] = useState(false)
+  const [operation, setOperation] = useState<OperationState | null>(null)
+  const [selectedFile, setSelectedFile] = useState<File | null>(null)
+  const [coverPhoto, setCoverPhoto] = useState<File | null>(null)
+  const [description, setDescription] = useState('Encrypted data drop')
+  const [price, setPrice] = useState(DEFAULT_BID_AMOUNT)
+  const [maxKeys, setMaxKeys] = useState('3')
+  const [royalty, setRoyalty] = useState('5')
+  const [manualReference, setManualReference] = useState('')
+  const [listingMetadata, setListingMetadata] = useState<ListingMetadataJSON | null>(null)
+  const [listingDetails, setListingDetails] = useState<ListingDetails | null>(null)
+  const [listingBids, setListingBids] = useState<BidLite[]>([])
+  const [listingError, setListingError] = useState('')
+  const [listingLoading, setListingLoading] = useState(false)
+  const [bidAmount, setBidAmount] = useState(DEFAULT_BID_AMOUNT)
+  const [increaseAmounts, setIncreaseAmounts] = useState<Record<string, string>>({})
 
-  const selectedListing = registry.find(item => item.id === selectedListingId) ?? registry[0]
   const canUseSwarm = Boolean(window.swarm)
   const canUseWallet = Boolean(window.ethereum)
+  const profileListings = profileEntries(profile.myListings)
+  const profileDKeys = profileEntries(profile.myDKeys)
+  const profileOpenBids = profileEntries(profile.myOpenBids)
+
+  const setBusy = (key: string, title: string, detail: string, progress = 4) => {
+    setOperation({ key, title, detail, progress })
+  }
+
+  const clearBusy = () => setOperation(null)
 
   const addActivity = async (entry: ActivityEntry, publish = true) => {
     setActivity(current => {
-      const next = [entry, ...current].slice(0, 160)
+      const next = [entry, ...current].slice(0, 180)
       localStorage.setItem(ACTIVITY_STORAGE_KEY, JSON.stringify(next))
       return next
     })
@@ -226,20 +410,28 @@ function App() {
     }
   }
 
-  const persistProfile = () => {
-    localStorage.setItem(PROFILE_STORAGE_KEY, profile.serialize())
+  const commitProfile = (source = profile) => {
+    const serialized = source.serialize()
+    localStorage.setItem(PROFILE_STORAGE_KEY, serialized)
+    setProfile(DkeyUserProfile.deserialize(serialized, config))
   }
 
-  const useSampleFile = () => {
-    const bytes = new TextEncoder().encode(JSON.stringify(SAMPLE_PAYLOAD, null, 2))
-    const file = new File([bytes], 'dkey-swarm-sample.json', { type: 'application/json' })
-    setSelectedFile(file)
-    setDescription('Sample encrypted JSON dataset for the DKey Swarm demo')
+  const rememberRegistryEntry = async (entry: RegistryEntry, publish = true) => {
+    setRegistry(current => {
+      const next = [entry, ...current.filter(item => item.id !== entry.id)]
+      localStorage.setItem(REGISTRY_STORAGE_KEY, JSON.stringify(next))
+      return next
+    })
+
+    if (publish && window.swarm && feedReady) {
+      await window.swarm.writeFeedEntry({ name: REGISTRY_FEED, data: JSON.stringify(entry) })
+      await addActivity(makeActivity('swarm', 'Registry feed entry', `${entry.fileName} at ${short(entry.swarmReference)}`, { reference: entry.swarmReference }))
+    }
   }
 
   const connectWallet = async () => {
     if (!window.ethereum) throw new Error('Freedom wallet provider not found')
-    setBusy('wallet')
+    setBusy('wallet', 'Connecting wallet', 'Adding and selecting Base, then requesting the active account.')
     try {
       try {
         await window.ethereum.request({ method: 'wallet_addEthereumChain', params: [baseChainParams] })
@@ -278,13 +470,13 @@ function App() {
       }
       return account
     } finally {
-      setBusy(null)
+      clearBusy()
     }
   }
 
   const connectSwarm = async () => {
     if (!window.swarm) throw new Error('Freedom Swarm provider not found')
-    setBusy('swarm')
+    setBusy('swarm', 'Connecting Swarm', 'Requesting Swarm access and preparing app feeds.')
     try {
       const access = await window.swarm.requestAccess()
       const caps = await window.swarm.getCapabilities()
@@ -301,32 +493,26 @@ function App() {
       setFeedReady(true)
       await addActivity(makeActivity('swarm', 'Feeds ready', `${REGISTRY_FEED}, ${ACTIVITY_FEED}`), false)
     } finally {
-      setBusy(null)
+      clearBusy()
     }
   }
 
-  const pollUpload = async (tagUid: number) => {
+  const pollUpload = async (tagUid: number, title: string, floor = 30, ceiling = 70) => {
     if (!window.swarm) return
-    for (let i = 0; i < 80; i += 1) {
+    for (let i = 0; i < 90; i += 1) {
       const status = await window.swarm.getUploadStatus({ tagUid })
-      setLastUploadStatus(status)
-      await addActivity(makeActivity('swarm', 'Upload status', `${status.progress}% sent (${status.sent}/${status.split})`, { detail: JSON.stringify(status) }), false)
+      const progress = floor + Math.round((Math.min(100, status.progress) / 100) * (ceiling - floor))
+      setBusy('upload', title, `${status.progress}% sent (${status.sent}/${status.split})`, progress)
       if (status.done) return
       await new Promise(resolve => setTimeout(resolve, 1500))
     }
   }
 
-  const publishRegistryEntry = async (entry: RegistryEntry) => {
-    setRegistry(current => {
-      const next = [entry, ...current.filter(item => item.id !== entry.id)]
-      localStorage.setItem(REGISTRY_STORAGE_KEY, JSON.stringify(next))
-      return next
-    })
-
-    if (window.swarm && feedReady) {
-      await window.swarm.writeFeedEntry({ name: REGISTRY_FEED, data: JSON.stringify(entry) })
-      await addActivity(makeActivity('swarm', 'Registry feed entry', `${entry.fileName} at ${short(entry.swarmReference)}`, { reference: entry.swarmReference }))
-    }
+  const useSampleFile = () => {
+    const bytes = new TextEncoder().encode(JSON.stringify(samplePayload, null, 2))
+    const file = new File([bytes], 'dkey-swarm-sample.json', { type: 'application/json' })
+    setSelectedFile(file)
+    setDescription('Sample encrypted JSON dataset for the DKey Swarm demo')
   }
 
   const createListing = async () => {
@@ -334,25 +520,38 @@ function App() {
     if (!selectedFile) throw new Error('Choose a file first')
     if (!window.swarm) throw new Error('Freedom Swarm provider not found')
 
-    setBusy('listing')
+    setBusy('listing', 'Encrypting file', `${selectedFile.name}, ${formatBytes(selectedFile.size)}`, 8)
     try {
       if (!swarmReady) await connectSwarm()
       await dkey.loadSnarkJS()
       dkey.configureCircuits('/circuits')
 
-      await addActivity(makeActivity('file', 'Encrypting file', `${selectedFile.name}, ${selectedFile.size} bytes`))
       const encrypted = await dkey.createKeyAndEncryptFile(await selectedFile.arrayBuffer())
       const encryptedBytes = new Uint8Array(await encrypted.encryptedData.arrayBuffer())
       const currentBlock = Number(await dkey.getCurrentBlock(config, BASE_CHAIN_ID))
+      let coverPhotoReference = ''
+      let coverPhotoLink = ''
 
-      const draftMetadata = {
+      if (coverPhoto) {
+        setBusy('cover', 'Uploading cover photo', coverPhoto.name, 18)
+        const extension = coverPhoto.name.includes('.') ? coverPhoto.name.slice(coverPhoto.name.lastIndexOf('.')) : ''
+        const coverPath = `cover-photo${extension}`
+        const coverUpload = await window.swarm.publishFiles({
+          files: [{ path: coverPath, bytes: await coverPhoto.arrayBuffer(), contentType: coverPhoto.type || 'application/octet-stream' }],
+        })
+        coverPhotoReference = coverUpload.reference
+        coverPhotoLink = `${coverUpload.bzzUrl.replace(/\/$/, '')}/${coverPath}`
+        if (coverUpload.tagUid) await pollUpload(coverUpload.tagUid, 'Uploading cover photo', 18, 32)
+      }
+
+      const metadataJSON: ListingMetadataJSON = {
         seller: { address: account },
         fileName: selectedFile.name,
         fileDescription: description,
         fileSizeInBytes: selectedFile.size,
         suggestedPriceInEth: Number(price),
-        coverPhotoReference: '',
-        coverPhotoLink: '',
+        coverPhotoReference,
+        coverPhotoLink,
         chainIds: [BASE_CHAIN_ID],
         listingCreatedAfterBlock: currentBlock,
         content: {
@@ -360,30 +559,30 @@ function App() {
           originalType: selectedFile.type || 'application/octet-stream',
         },
       }
+      const metadataBytes = new TextEncoder().encode(JSON.stringify(metadataJSON, null, 2))
 
-      const metadataBytes = new TextEncoder().encode(JSON.stringify(draftMetadata, null, 2))
+      setBusy('upload', 'Uploading listing files', 'Publishing encrypted file and metadata to Swarm.', 34)
       const upload = await window.swarm.publishFiles({
         files: [
           { path: 'encrypted.bin', bytes: encryptedBytes, contentType: 'application/octet-stream' },
           { path: 'metadata.json', bytes: metadataBytes, contentType: 'application/json' },
         ],
       })
-
+      if (upload.tagUid) await pollUpload(upload.tagUid, 'Uploading listing files', 34, 68)
       await addActivity(makeActivity('swarm', 'Manifest published', upload.bzzUrl, { reference: upload.reference }))
-      if (upload.tagUid) await pollUpload(upload.tagUid)
 
+      setBusy('tx', 'Waiting for signature', 'Confirm createListing in your wallet.', 72)
       const metadata = new ListingMetadata(
         { address: account },
         selectedFile.name,
         description,
         selectedFile.size,
         Number(price),
-        '',
-        '',
+        coverPhotoReference,
+        coverPhotoLink,
         [BASE_CHAIN_ID],
         currentBlock,
       )
-
       const result = await profile.createListing(
         upload.reference,
         metadata,
@@ -393,14 +592,15 @@ function App() {
         account,
       )
 
+      setBusy('tx', 'Confirming transaction', 'Updating your local DKey profile.', 92)
       if (!result.success || !result.receipt) throw new Error(`createListing failed: ${result.result}`)
-      persistProfile()
+      commitProfile(result.profile ?? profile)
       await addActivity(makeActivity('chain', 'Listing created', `Block ${result.receipt.blockNumber.toString()}`, {
         txHash: result.receipt.transactionHash,
         reference: upload.reference,
       }))
 
-      await publishRegistryEntry({
+      const entry = {
         id: `${BASE_CHAIN_ID}:${upload.reference}`,
         swarmReference: upload.reference,
         bzzUrl: upload.bzzUrl,
@@ -414,55 +614,19 @@ function App() {
         listingTxHash: result.receipt.transactionHash,
         listingBlockNumber: result.receipt.blockNumber.toString(),
         createdAt: Date.now(),
-      })
-    } finally {
-      setBusy(null)
-    }
-  }
-
-  const importManualListing = async () => {
-    if (!manualReference.trim()) return
-    const formatted = dkey.formatSwarmReference(manualReference)
-    const bzzUrl = formatted.bzzUrl
-    let metadata: Partial<RegistryEntry> = {}
-    try {
-      const manifestMetadata = await fetchBzzJSON<Record<string, unknown>>(bzzUrl, 'metadata.json')
-      metadata = {
-        fileName: String(manifestMetadata.fileName ?? 'Swarm data'),
-        fileDescription: String(manifestMetadata.fileDescription ?? ''),
-        fileSizeInBytes: Number(manifestMetadata.fileSizeInBytes ?? 0),
-        suggestedPriceInEth: Number(manifestMetadata.suggestedPriceInEth ?? bidAmount),
       }
-    } catch {
-      metadata = { fileName: 'Swarm data', fileDescription: 'Manual import', fileSizeInBytes: 0, suggestedPriceInEth: Number(bidAmount) }
+      await rememberRegistryEntry(entry)
+      setSelectedFile(null)
+      setCoverPhoto(null)
+      navigate(`/listings/${upload.reference}`)
+    } finally {
+      clearBusy()
     }
-
-    const entry: RegistryEntry = {
-      id: `${BASE_CHAIN_ID}:${formatted.normalizedReference}`,
-      swarmReference: formatted.normalizedReference,
-      bzzUrl,
-      fileName: metadata.fileName ?? 'Swarm data',
-      fileDescription: metadata.fileDescription ?? '',
-      fileSizeInBytes: metadata.fileSizeInBytes ?? 0,
-      suggestedPriceInEth: metadata.suggestedPriceInEth ?? Number(bidAmount),
-      chainId: BASE_CHAIN_ID,
-      contractAddress: dkey.contracts.DKeyStoreL2[BASE_CHAIN_ID].address,
-      sellerAddress: '',
-      listingTxHash: '',
-      listingBlockNumber: '0',
-      createdAt: Date.now(),
-    }
-    await publishRegistryEntry(entry)
-    await addActivity(makeActivity('swarm', 'Listing imported', `${entry.fileName} at ${short(entry.swarmReference)}`, {
-      reference: entry.swarmReference,
-    }), false)
-    setSelectedListingId(entry.id)
-    setManualReference('')
   }
 
   const refreshRegistryFromFeed = async () => {
     if (!window.swarm) throw new Error('Freedom Swarm provider not found')
-    setBusy('registry')
+    setBusy('registry', 'Loading registry', 'Reading listing entries from the app feed.')
     try {
       await connectSwarm()
       const latest = await window.swarm.readFeedEntry({ name: REGISTRY_FEED })
@@ -473,7 +637,7 @@ function App() {
           const entry = await window.swarm.readFeedEntry({ name: REGISTRY_FEED, index: i })
           entries.push(decodeFeedJSON<RegistryEntry>(entry))
         } catch {
-          // Sparse or missing feed entries are acceptable in a demo journal.
+          // Sparse feed entries are fine for this append-only demo journal.
         }
       }
       const deduped = [...entries].reverse().filter((item, index, all) => all.findIndex(candidate => candidate.id === item.id) === index)
@@ -481,133 +645,187 @@ function App() {
       localStorage.setItem(REGISTRY_STORAGE_KEY, JSON.stringify(deduped))
       await addActivity(makeActivity('swarm', 'Registry loaded', `${deduped.length} listing records`), false)
     } finally {
-      setBusy(null)
+      clearBusy()
     }
   }
 
-  const fetchDetailsAndBids = async () => {
-    if (!selectedListing) return
-    setBusy('bids')
+  const openManualReference = () => {
+    if (!manualReference.trim()) return
+    const normalized = normalizeReference(manualReference)
+    setManualReference('')
+    navigate(`/listings/${normalized}`)
+  }
+
+  const copyReference = async (reference: string) => {
+    await navigator.clipboard.writeText(reference)
+    await addActivity(makeActivity('file', 'Swarm hash copied', short(reference), { reference }), false)
+  }
+
+  const loadListing = async (reference: string) => {
+    setListingLoading(true)
+    setListingError('')
+    setListingMetadata(null)
+    setListingDetails(null)
+    setListingBids([])
     try {
-      const metadata = new ListingMetadata(
-        { address: selectedListing.sellerAddress },
-        selectedListing.fileName,
-        selectedListing.fileDescription,
-        selectedListing.fileSizeInBytes,
-        selectedListing.suggestedPriceInEth,
-        '',
-        '',
-        [BASE_CHAIN_ID],
-        Number(selectedListing.listingBlockNumber || dkey.contracts.DKeyStoreL2[BASE_CHAIN_ID].deploymentBlockNumber),
-      )
-      const details = await dkey.fetchListingDetails(selectedListing.swarmReference, metadata, config)
-      const endBlock = Number(await dkey.getCurrentBlock(config, BASE_CHAIN_ID))
-      const bids = await dkey.fetchBids(
-        selectedListing.swarmReference,
-        BASE_CHAIN_ID,
-        config,
-        Number(details.listingCreatedAfterBlock || dkey.contracts.DKeyStoreL2[BASE_CHAIN_ID].deploymentBlockNumber),
-        Number(details.listingCreatedAfterBlock || dkey.contracts.DKeyStoreL2[BASE_CHAIN_ID].deploymentBlockNumber),
-        endBlock,
-        5000,
-      )
-      const withStatuses = await dkey.fetchBidStatuses(BASE_CHAIN_ID, bids, config)
-      setOpenBids(withStatuses)
-      await addActivity(makeActivity('chain', 'Listing refreshed', `${withStatuses.length} bids found for ${short(selectedListing.swarmReference)}`))
+      const normalized = normalizeReference(reference)
+      const bzzUrl = bzzUrlForReference(normalized)
+      const metadataJSON = await fetchBzzJSON<ListingMetadataJSON>(bzzUrl, 'metadata.json')
+      const metadata = metadataFromJSON(metadataJSON)
+      const details = await dkey.fetchListingDetails(normalized, metadata, config) as ListingDetails
+      const endBlock = Number(await dkey.getCurrentBlock(config, details.chainId))
+      const contractInfo = dkey.contracts.DKeyStoreL2[details.chainId as keyof typeof dkey.contracts.DKeyStoreL2]
+      const bidFloor = Number(details.listingCreatedAfterBlock || contractInfo.deploymentBlockNumber)
+      const bids = await dkey.fetchBids(normalized, details.chainId, config, bidFloor, bidFloor, endBlock, 5000)
+      const withStatuses = await dkey.fetchBidStatuses(details.chainId, bids, config)
+      setListingMetadata(metadataJSON)
+      setListingDetails(details)
+      setListingBids(withStatuses.filter(bid => bid.isOpen))
+      await rememberRegistryEntry(registryEntryFromMetadata(normalized, bzzUrl, metadataJSON), false)
+    } catch (error) {
+      setListingError(formatError(error))
     } finally {
-      setBusy(null)
+      setListingLoading(false)
     }
   }
 
   const makeBid = async () => {
     const account = address ?? await connectWallet()
-    if (!selectedListing) throw new Error('Select a listing first')
-    setBusy('bid')
+    if (route.name !== 'listing') throw new Error('Open a listing first')
+    if (!listingMetadata || !listingDetails) throw new Error('Listing details are not loaded yet')
+    setBusy('bid', 'Waiting for signature', `Bidding ${bidAmount} ETH on ${short(route.reference)}.`, 18)
     try {
-      const metadata = new ListingMetadata(
-        { address: selectedListing.sellerAddress },
-        selectedListing.fileName,
-        selectedListing.fileDescription,
-        selectedListing.fileSizeInBytes,
-        selectedListing.suggestedPriceInEth,
-        '',
-        '',
-        [BASE_CHAIN_ID],
-        Number(selectedListing.listingBlockNumber || dkey.contracts.DKeyStoreL2[BASE_CHAIN_ID].deploymentBlockNumber),
+      const metadata = metadataFromJSON(listingMetadata)
+      const result = await profile.makeBid(
+        normalizeReference(route.reference),
+        Number(bidAmount),
+        metadata,
+        account,
+        listingDetails.chainId,
+        listingDetails.canDkeysBeSold,
       )
-      const result = await profile.makeBid(selectedListing.swarmReference, Number(bidAmount), metadata, account, BASE_CHAIN_ID)
+      setBusy('bid', 'Confirming bid', 'Saving this open bid to your DKey profile.', 82)
       if (!result.success || !result.receipt) throw new Error(`makeBid failed: ${result.result}`)
-      persistProfile()
-      await addActivity(makeActivity('chain', 'Bid placed', `${bidAmount} ETH on ${short(selectedListing.swarmReference)}`, {
+      commitProfile(result.profile ?? profile)
+      await addActivity(makeActivity('chain', 'Bid placed', `${bidAmount} ETH on ${short(route.reference)}`, {
         txHash: result.receipt.transactionHash,
-        reference: selectedListing.swarmReference,
+        reference: normalizeReference(route.reference),
       }))
+      await loadListing(route.reference)
     } finally {
-      setBusy(null)
+      clearBusy()
     }
   }
 
-  const fillFirstBid = async () => {
-    if (!selectedListing) throw new Error('Select a listing first')
-    const bid = openBids.find(item => item.isOpen)
-    if (!bid) throw new Error('No open bid loaded')
-    setBusy('fill')
+  const fillBid = async (bid: BidLite) => {
+    if (route.name !== 'listing' || !listingDetails) throw new Error('Open a listing first')
+    setBusy('fill', 'Preparing DKey proof', `Encrypting key material for ${short(bid.pubKeyX)}.`, 12)
     try {
       await dkey.loadSnarkJS()
       dkey.configureCircuits('/circuits')
+      setBusy('fill', 'Waiting for signature', 'Confirm the DKey delivery transaction.', 64)
       const result = await profile.fillBid(
-        selectedListing.swarmReference,
+        normalizeReference(route.reference),
         bid.pubKeyX,
         bid.pubKeyY,
         Number(bid.bidAmountInEth),
-        BASE_CHAIN_ID,
+        listingDetails.chainId,
       )
       if (!result.success || !result.receipt) throw new Error(`fillBid failed: ${result.result}`)
-      persistProfile()
+      commitProfile(result.profile ?? profile)
       await addActivity(makeActivity('chain', 'DKey provided', `${short(bid.pubKeyX)} received key material`, {
         txHash: result.receipt.transactionHash,
-        reference: selectedListing.swarmReference,
+        reference: normalizeReference(route.reference),
+      }))
+      await loadListing(route.reference)
+    } finally {
+      clearBusy()
+    }
+  }
+
+  const increaseBid = async (reference: string, chainId: number) => {
+    const amount = increaseAmounts[reference] || DEFAULT_BID_AMOUNT
+    setBusy('increase', 'Waiting for signature', `Increasing bid by ${amount} ETH.`, 18)
+    try {
+      const result = await profile.updateBid(reference, chainId, Number(amount))
+      setBusy('increase', 'Confirming update', 'Saving increased bid to your profile.', 82)
+      if (!result.success || !result.receipt) throw new Error(`updateBid failed: ${result.result}`)
+      commitProfile(result.profile ?? profile)
+      await addActivity(makeActivity('chain', 'Bid increased', `${amount} ETH added to ${short(reference)}`, {
+        txHash: result.receipt.transactionHash,
+        reference,
       }))
     } finally {
-      setBusy(null)
+      clearBusy()
     }
   }
 
-  const fetchDKeyAndDownload = async () => {
-    if (!selectedListing) throw new Error('Select a listing first')
-    const open = Object.values(profile.myOpenBids[BASE_CHAIN_ID] ?? {}).find(bid => bid.swarmReference === selectedListing.swarmReference)
-    if (!open) throw new Error('No local open bid for this listing')
-    setBusy('download')
+  const reclaimBid = async (reference: string, chainId: number) => {
+    setBusy('reclaim', 'Waiting for signature', `Reclaiming bid for ${short(reference)}.`, 18)
     try {
-      const result = await profile.fetchDkey(open)
-      if (!result.success) throw new Error(`fetchDkey failed: ${result.result}`)
-      persistProfile()
-      const acquired = profile.getDKey(selectedListing.swarmReference, BASE_CHAIN_ID)
-      const encryptedBytes = await fetchBzzBytes(selectedListing.bzzUrl, 'encrypted.bin')
-      const clearBytes = await acquired.decryptFile(encryptedBytes.buffer)
-      const blob = new Blob([clearBytes.slice()], { type: 'application/octet-stream' })
-      const url = URL.createObjectURL(blob)
-      const link = document.createElement('a')
-      link.href = url
-      link.download = acquired.fileName
-      link.click()
-      URL.revokeObjectURL(url)
-      await addActivity(makeActivity('file', 'Downloaded and decrypted', acquired.fileName, { reference: selectedListing.swarmReference }))
+      const result = await profile.reclaimBid(reference, chainId)
+      setBusy('reclaim', 'Confirming reclaim', 'Removing the open bid from your profile.', 82)
+      if (!result.success || !result.receipt) throw new Error(`reclaimBid failed: ${result.result}`)
+      commitProfile(result.profile ?? profile)
+      await addActivity(makeActivity('chain', 'Bid reclaimed', short(reference), {
+        txHash: result.receipt.transactionHash,
+        reference,
+      }))
     } finally {
-      setBusy(null)
+      clearBusy()
     }
   }
 
-  const run = (label: string, action: () => Promise<void>) => {
-    action().catch(error => {
+  const fetchDkeyForBid = async (reference: string, chainId: number) => {
+    const bid = profile.myOpenBids[chainId]?.[reference]
+    if (!bid) throw new Error('No local open bid for this listing')
+    setBusy('dkey', 'Fetching DKey', 'Scanning chain events for encrypted key material.', 18)
+    try {
+      const result = await profile.fetchDkey(bid)
+      if (!result.success) throw new Error(`fetchDkey failed: ${result.result}`)
+      commitProfile(result.profile ?? profile)
+      await addActivity(makeActivity('chain', 'DKey fetched', short(reference), { reference }))
+    } finally {
+      clearBusy()
+    }
+  }
+
+  const downloadDkeyFile = async (reference: string, chainId: number) => {
+    const item = profile.myDKeys[chainId]?.[reference]
+    if (!item) throw new Error('No DKey found for this listing')
+    const bzzUrl = bzzUrlForReference(reference)
+    setBusy('download', 'Downloading encrypted file', item.fileName, 8)
+    try {
+      const encryptedBytes = await fetchBzzBytes(bzzUrl, 'encrypted.bin', progress => {
+        setBusy('download', 'Downloading encrypted file', `${progress}% fetched`, 8 + Math.round(progress * 0.48))
+      })
+      setBusy('download', 'Decrypting file', 'Using your local DKey material.', 72)
+      const clearBytes = await item.decryptFile(encryptedBytes.buffer)
+      setBusy('download', 'Starting download', item.fileName, 96)
+      downloadBytes(clearBytes, item.fileName)
+      await addActivity(makeActivity('file', 'Downloaded and decrypted', item.fileName, { reference }))
+    } finally {
+      clearBusy()
+    }
+  }
+
+  const run = (label: string, action: () => Promise<unknown> | unknown) => {
+    Promise.resolve(action()).catch(error => {
       void addActivity(makeActivity('error', label, formatError(error)), false)
-      setBusy(null)
+      clearBusy()
     })
   }
 
   useEffect(() => {
     dkey.configureCircuits('/circuits')
     void dkey.loadSnarkJS()
+  }, [])
+
+  useEffect(() => {
+    const onHashChange = () => setRoute(routeFromHash())
+    window.addEventListener('hashchange', onHashChange)
+    if (!window.location.hash) navigate('/profile')
+    return () => window.removeEventListener('hashchange', onHashChange)
   }, [])
 
   useEffect(() => {
@@ -623,13 +841,42 @@ function App() {
       .catch(() => undefined)
   }, [])
 
+  useEffect(() => {
+    if (route.name === 'listing') {
+      const reference = route.reference
+      const timer = window.setTimeout(() => {
+        void loadListing(reference)
+      }, 0)
+      return () => window.clearTimeout(timer)
+    }
+    return undefined
+    // The listing loader is intentionally route-driven; its internal state updates
+    // should not re-run this effect after every fetch phase.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [route])
+
+  const isCurrentUserListingOwner = Boolean(
+    route.name === 'listing'
+    && listingDetails
+    && address
+    && listingDetails.listingOwnerAddress.toLowerCase() === address.toLowerCase(),
+  )
+
+  const activeReference = route.name === 'listing' ? tryNormalizeReference(route.reference) : ''
+  const listingBzzUrl = route.name === 'listing' ? tryBzzUrlForReference(route.reference) : ''
+  const coverUrl = coverUrlForMetadata(listingMetadata, listingBzzUrl)
+
   return (
     <main className="shell">
       <header className="topbar">
         <div>
-          <p className="eyebrow">DKey Swarm Demo</p>
-          <h1>Encrypted data marketplace</h1>
+          <p className="eyebrow">DKey Swarm</p>
+          <h1>{route.name === 'create' ? 'Create listing' : route.name === 'listing' ? 'View listing' : 'Profile'}</h1>
         </div>
+        <nav className="nav">
+          <button className={route.name === 'profile' ? 'nav-link active' : 'nav-link'} onClick={() => navigate('/profile')}>Profile</button>
+          <button className={route.name === 'create' ? 'nav-link active' : 'nav-link'} onClick={() => navigate('/listings/new')}>Create</button>
+        </nav>
         <div className="status-row">
           <span className={canUseWallet ? 'status good' : 'status bad'}>wallet {walletReady ? short(address ?? '') : canUseWallet ? 'ready' : 'missing'}</span>
           <span className={canUseSwarm ? 'status good' : 'status bad'}>swarm {swarmReady ? 'publish' : canUseSwarm ? 'detected' : 'missing'}</span>
@@ -638,114 +885,245 @@ function App() {
       </header>
 
       <section className="actions">
-        <button onClick={() => run('Connect wallet', async () => { await connectWallet() })} disabled={busy !== null || !canUseWallet}>Add Base + connect wallet</button>
-        <button onClick={() => run('Connect Swarm', connectSwarm)} disabled={busy !== null || !canUseSwarm}>Connect Swarm + feeds</button>
-        <button onClick={() => run('Load registry', refreshRegistryFromFeed)} disabled={busy !== null || !canUseSwarm}>Load registry feed</button>
-        {busy && <span className="working">Working: {busy}</span>}
+        <button onClick={() => run('Connect wallet', connectWallet)} disabled={operation !== null || !canUseWallet}>Connect wallet</button>
+        <button onClick={() => run('Connect Swarm', connectSwarm)} disabled={operation !== null || !canUseSwarm}>Connect Swarm</button>
+        <button onClick={() => run('Load registry', refreshRegistryFromFeed)} disabled={operation !== null || !canUseSwarm}>Load registry</button>
+        <div className="manual">
+          <input placeholder="Open Swarm hash" value={manualReference} onChange={event => setManualReference(event.target.value)} />
+          <button onClick={() => run('Open listing', openManualReference)} disabled={operation !== null}>View</button>
+        </div>
       </section>
 
-      <section className="workspace">
-        <div className="panel seller">
-          <div className="panel-heading">
-            <span>Seller</span>
-            <strong>Publish encrypted data</strong>
+      {operation && (
+        <section className="operation" aria-live="polite">
+          <div>
+            <strong>{operation.title}</strong>
+            <span>{operation.detail}</span>
           </div>
-          <label>
-            Data file
-            <input type="file" onChange={event => setSelectedFile(event.target.files?.[0] ?? null)} />
-          </label>
-          <button onClick={useSampleFile} disabled={busy !== null}>Use sample payload</button>
-          {selectedFile && <p className="file-note">{selectedFile.name} · {selectedFile.size} bytes</p>}
-          <label>
-            Description
-            <input value={description} onChange={event => setDescription(event.target.value)} />
-          </label>
-          <div className="inline-fields">
-            <label>
-              Price ETH
-              <input value={price} onChange={event => setPrice(event.target.value)} inputMode="decimal" />
-            </label>
-            <label>
-              Keys
-              <input value={maxKeys} onChange={event => setMaxKeys(event.target.value)} inputMode="numeric" />
-            </label>
-            <label>
-              Royalty %
-              <input value={royalty} onChange={event => setRoyalty(event.target.value)} inputMode="numeric" />
-            </label>
-          </div>
-          <button className="primary" onClick={() => run('Create listing', createListing)} disabled={busy !== null || !selectedFile}>Encrypt, upload, list</button>
-          {lastUploadStatus && <progress value={lastUploadStatus.progress} max={100} />}
-        </div>
+          <progress value={operation.progress} max={100} />
+        </section>
+      )}
 
-        <div className="panel market">
-          <div className="panel-heading">
-            <span>Registry</span>
-            <strong>{registry.length} listing records</strong>
+      {route.name === 'profile' && (
+        <section className="page profile-page">
+          <div className="profile-head">
+            <div>
+              <span>Connected address · {registry.length} cached listings</span>
+              <code>{address ?? 'Connect a wallet to initialize your profile'}</code>
+            </div>
+            <button onClick={() => run('Load registry', refreshRegistryFromFeed)} disabled={operation !== null || !canUseSwarm}>Sync feed</button>
           </div>
-          <div className="manual">
-            <input placeholder="bzz:// or 64-char Swarm reference" value={manualReference} onChange={event => setManualReference(event.target.value)} />
-            <button onClick={() => run('Import listing', importManualListing)} disabled={busy !== null}>Import</button>
-          </div>
-          <div className="listing-list">
-            {registry.map(item => (
-              <button
-                key={item.id}
-                className={selectedListing?.id === item.id ? 'listing selected' : 'listing'}
-                onClick={() => setSelectedListingId(item.id)}
-              >
-                <span>{item.fileName}</span>
-                <code>{short(item.swarmReference)}</code>
-                <small>{item.suggestedPriceInEth} ETH · {item.fileSizeInBytes} bytes</small>
-              </button>
-            ))}
-            {registry.length === 0 && <p className="empty">No registry entries yet. Publish or import a Swarm listing.</p>}
-          </div>
-        </div>
 
-        <div className="panel buyer">
-          <div className="panel-heading">
-            <span>Buyer</span>
-            <strong>{selectedListing ? selectedListing.fileName : 'No listing selected'}</strong>
-          </div>
-          {selectedListing && (
-            <>
-              <dl>
-                <div><dt>Reference</dt><dd>{short(selectedListing.swarmReference)}</dd></div>
-                <div><dt>Contract</dt><dd>{short(selectedListing.contractAddress)}</dd></div>
-                <div><dt>Seller</dt><dd>{short(selectedListing.sellerAddress)}</dd></div>
-              </dl>
-              <label>
-                Bid amount ETH
-                <input value={bidAmount} onChange={event => setBidAmount(event.target.value)} inputMode="decimal" />
-              </label>
-              <div className="button-grid">
-                <button onClick={() => run('Refresh listing', fetchDetailsAndBids)} disabled={busy !== null}>Details + bids</button>
-                <button onClick={() => run('Make bid', makeBid)} disabled={busy !== null}>Make bid</button>
-                <button onClick={() => run('Fill bid', fillFirstBid)} disabled={busy !== null}>Fill first bid</button>
-                <button onClick={() => run('Fetch DKey', fetchDKeyAndDownload)} disabled={busy !== null}>Fetch key + download</button>
-              </div>
-              <div className="bids">
-                {openBids.map(bid => (
-                  <div key={`${bid.pubKeyX}-${bid.pubKeyY}`}>
-                    <code>{short(bid.pubKeyX)}</code>
-                    <span>{bid.bidAmountInEth} ETH</span>
-                    <span>{bid.isOpen ? 'open' : 'closed'}</span>
+          <section className="section-block">
+            <div className="section-title">
+              <h2>Listings</h2>
+              <span>{profileListings.length}</span>
+            </div>
+            <div className="item-list">
+              {profileListings.map(([reference, listing]) => (
+                <article className="item-row" key={reference}>
+                  <div>
+                    <strong>{listing.metadata.fileName}</strong>
+                    <p>{listing.metadata.fileDescription || 'No description'}</p>
+                    <code>{short(reference)}</code>
                   </div>
-                ))}
+                  <div className="row-meta">
+                    <span>{listing.howManyDKeysSold}/{listing.howManyDKeysForSale} sold</span>
+                    <span>{listing.metadata.suggestedPriceInEth} ETH</span>
+                  </div>
+                  <div className="row-actions">
+                    <button onClick={() => navigate(`/listings/${reference}`)}>View</button>
+                    <button onClick={() => run('Copy reference', () => copyReference(reference))}>Copy</button>
+                  </div>
+                </article>
+              ))}
+              {profileListings.length === 0 && <p className="empty">No listings in this local profile yet.</p>}
+            </div>
+          </section>
+
+          <section className="section-block">
+            <div className="section-title">
+              <h2>DKeys</h2>
+              <span>{profileDKeys.length}</span>
+            </div>
+            <div className="item-list">
+              {profileDKeys.map(([reference, item]) => (
+                <article className="item-row" key={reference}>
+                  <div>
+                    <strong>{item.fileName}</strong>
+                    <p>Paid {item.amountPaidInEth} ETH on Base</p>
+                    <code>{short(reference)}</code>
+                  </div>
+                  <div className="row-meta">
+                    <span>{item.canSell ? 'resell ready' : 'personal key'}</span>
+                  </div>
+                  <div className="row-actions">
+                    <button onClick={() => run('Download DKey file', () => downloadDkeyFile(reference, item.chainId))}>Download</button>
+                    <button onClick={() => navigate(`/listings/${reference}`)}>View</button>
+                  </div>
+                </article>
+              ))}
+              {profileDKeys.length === 0 && <p className="empty">No DKeys acquired yet.</p>}
+            </div>
+          </section>
+
+          <section className="section-block">
+            <div className="section-title">
+              <h2>Open bids</h2>
+              <span>{profileOpenBids.length}</span>
+            </div>
+            <div className="item-list">
+              {profileOpenBids.map(([reference, bid]) => (
+                <article className="item-row bid-row" key={reference}>
+                  <div>
+                    <strong>{bid.fileName}</strong>
+                    <p>{bid.bidAmountInEth} ETH bid on Base</p>
+                    <code>{short(reference)}</code>
+                  </div>
+                  <label className="compact-field">
+                    Increase ETH
+                    <input
+                      value={increaseAmounts[reference] ?? DEFAULT_BID_AMOUNT}
+                      onChange={event => setIncreaseAmounts(current => ({ ...current, [reference]: event.target.value }))}
+                      inputMode="decimal"
+                    />
+                  </label>
+                  <div className="row-actions">
+                    <button onClick={() => run('Increase bid', () => increaseBid(reference, bid.chainId))}>Increase</button>
+                    <button onClick={() => run('Reclaim bid', () => reclaimBid(reference, bid.chainId))}>Reclaim</button>
+                    <button onClick={() => navigate(`/listings/${reference}`)}>View</button>
+                    {bid.isFilled && <button onClick={() => run('Fetch DKey', () => fetchDkeyForBid(reference, bid.chainId))}>Fetch DKey</button>}
+                  </div>
+                </article>
+              ))}
+              {profileOpenBids.length === 0 && <p className="empty">No open bids in this local profile.</p>}
+            </div>
+          </section>
+        </section>
+      )}
+
+      {route.name === 'create' && (
+        <section className="page create-page">
+          <div className="form-grid">
+            <section className="section-block create-form">
+              <div className="section-title">
+                <h2>Listing file</h2>
+                <span>encrypted before upload</span>
               </div>
+              <label>
+                File to sell
+                <input type="file" onChange={event => setSelectedFile(event.target.files?.[0] ?? null)} />
+              </label>
+              <button onClick={useSampleFile} disabled={operation !== null}>Use sample payload</button>
+              {selectedFile && <p className="file-note">{selectedFile.name} · {formatBytes(selectedFile.size)}</p>}
+              <label>
+                Cover photo
+                <input type="file" accept="image/*" onChange={event => setCoverPhoto(event.target.files?.[0] ?? null)} />
+              </label>
+              {coverPhoto && <p className="file-note">{coverPhoto.name} · {formatBytes(coverPhoto.size)}</p>}
+            </section>
+
+            <section className="section-block create-form">
+              <div className="section-title">
+                <h2>Terms</h2>
+                <span>Base mainnet</span>
+              </div>
+              <label>
+                Description
+                <textarea value={description} onChange={event => setDescription(event.target.value)} />
+              </label>
+              <div className="inline-fields">
+                <label>
+                  Suggested price ETH
+                  <input value={price} onChange={event => setPrice(event.target.value)} inputMode="decimal" />
+                </label>
+                <label>
+                  Keys
+                  <input value={maxKeys} onChange={event => setMaxKeys(event.target.value)} inputMode="numeric" />
+                </label>
+                <label>
+                  Royalty %
+                  <input value={royalty} onChange={event => setRoyalty(event.target.value)} inputMode="numeric" />
+                </label>
+              </div>
+              <button className="primary" onClick={() => run('Create listing', createListing)} disabled={operation !== null || !selectedFile}>Encrypt, upload, list</button>
+            </section>
+          </div>
+        </section>
+      )}
+
+      {route.name === 'listing' && (
+        <section className="page listing-page">
+          {listingLoading && <p className="empty">Loading metadata and on-chain listing details...</p>}
+          {listingError && <p className="error-line">{listingError}</p>}
+          {!listingLoading && listingDetails && (
+            <>
+              <section className="listing-hero">
+                <div className="cover">
+                  {coverUrl ? <img src={coverUrl} alt="" /> : <span>No cover photo</span>}
+                </div>
+                <div className="listing-summary">
+                  <span>Base listing</span>
+                  <h2>{listingDetails.fileName}</h2>
+                  <p>{listingDetails.description || 'No description supplied.'}</p>
+                  <code>{short(activeReference)}</code>
+                </div>
+              </section>
+
+              <section className="details-grid">
+                <div><span>Seller</span><strong>{short(listingDetails.listingOwnerAddress)}</strong></div>
+                <div><span>File size</span><strong>{formatBytes(listingDetails.fileSizeInBytes)}</strong></div>
+                <div><span>Network</span><strong>Base</strong></div>
+                <div><span>Keys for sale</span><strong>{listingDetails.howManyDKeysForSale}</strong></div>
+                <div><span>Suggested price</span><strong>{listingDetails.priceInEth} ETH</strong></div>
+                <div><span>Keys sold</span><strong>{listingDetails.howManyDKeysSold}</strong></div>
+                <div><span>Royalty</span><strong>{listingDetails.royaltyPercentage}%</strong></div>
+                <div><span>Open bids</span><strong>{listingBids.length}</strong></div>
+              </section>
+
+              <section className="section-block bid-panel">
+                <div className="section-title">
+                  <h2>Bid</h2>
+                  <span>{profile.hasOpenBid(activeReference, listingDetails.chainId) ? 'already in profile' : 'open offer'}</span>
+                </div>
+                <div className="bid-form">
+                  <label>
+                    Bid price ETH
+                    <input value={bidAmount} onChange={event => setBidAmount(event.target.value)} inputMode="decimal" />
+                  </label>
+                  <button className="primary" onClick={() => run('Make bid', makeBid)} disabled={operation !== null}>Bid</button>
+                </div>
+              </section>
+
+              <section className="section-block">
+                <div className="section-title">
+                  <h2>Current open bids</h2>
+                  <span>{listingBids.length}</span>
+                </div>
+                <div className="bid-list">
+                  {listingBids.map(bid => (
+                    <article className="bid-card" key={`${bid.pubKeyX}-${bid.pubKeyY}`}>
+                      <code>{short(bid.pubKeyX)}</code>
+                      <strong>{bid.bidAmountInEth} ETH</strong>
+                      <span>{bid.isOpen ? 'open' : 'closed'}</span>
+                      {isCurrentUserListingOwner && <button onClick={() => run('Fill bid', () => fillBid(bid))}>Fill</button>}
+                    </article>
+                  ))}
+                  {listingBids.length === 0 && <p className="empty">No open bids found for this listing.</p>}
+                </div>
+              </section>
             </>
           )}
-        </div>
-      </section>
+        </section>
+      )}
 
       <section className="ledger">
-        <div className="panel-heading">
-          <span>Interaction ledger</span>
-          <strong>{activity.length} local events</strong>
+        <div className="section-title">
+          <h2>Activity</h2>
+          <span>{activity.length}</span>
         </div>
         <div className="activity-list">
-          {activity.map(item => (
+          {activity.slice(0, 18).map(item => (
             <article key={item.id} className={`activity ${item.kind}`}>
               <span>{new Date(item.time).toLocaleTimeString()}</span>
               <strong>{item.label}</strong>
@@ -754,6 +1132,7 @@ function App() {
               {item.reference && <code>{short(item.reference)}</code>}
             </article>
           ))}
+          {activity.length === 0 && <p className="empty">Activity will appear after wallet, Swarm, and listing actions.</p>}
         </div>
       </section>
     </main>
