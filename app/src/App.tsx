@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import dkey, { BidLite, DkeyUserProfile, ListingMetadata } from 'dkey-lib'
 import type { Address } from 'viem'
-import { connect, createConfig, getAccount, http, injected } from '@wagmi/core'
+import { connect, createConfig, disconnect, getAccount, http, injected } from '@wagmi/core'
 import { base } from '@wagmi/core/chains'
 import './App.css'
 
@@ -206,9 +206,9 @@ const decodeFeedJSON = <T,>(entry: { data: string }) => {
 
 const routeFromHash = (): Route => {
   const path = window.location.hash.replace(/^#/, '') || '/profile'
+  if (path === '/listings/new') return { name: 'create' }
   const listingMatch = path.match(/^\/listings\/([^/]+)$/)
   if (listingMatch) return { name: 'listing', reference: decodeURIComponent(listingMatch[1]) }
-  if (path === '/listings/new') return { name: 'create' }
   return { name: 'profile' }
 }
 
@@ -325,6 +325,30 @@ const downloadBytes = (bytes: Uint8Array, fileName: string, type = 'application/
   link.download = fileName
   link.click()
   URL.revokeObjectURL(url)
+}
+
+const copyText = async (text: string) => {
+  const textarea = document.createElement('textarea')
+  textarea.value = text
+  textarea.setAttribute('readonly', 'true')
+  textarea.style.position = 'fixed'
+  textarea.style.left = '-9999px'
+  textarea.style.top = '0'
+  document.body.appendChild(textarea)
+  textarea.focus()
+  textarea.select()
+
+  try {
+    if (document.execCommand('copy')) return
+  } finally {
+    document.body.removeChild(textarea)
+  }
+
+  if (!navigator.clipboard?.writeText) {
+    throw new Error('Clipboard copy is not available in this browser context')
+  }
+
+  await navigator.clipboard.writeText(text)
 }
 
 const profileEntries = <T,>(record: Record<number, Record<string, T>>, chainId = BASE_CHAIN_ID) => Object.entries(record[chainId] ?? {})
@@ -449,6 +473,12 @@ function App() {
 
       const connector = config.connectors[0]
       try {
+        await disconnect(config)
+      } catch {
+        // A fresh page load may not have an initialized Wagmi connection yet.
+      }
+
+      try {
         await connect(config, { connector })
       } catch (error) {
         const message = formatError(error)
@@ -516,7 +546,7 @@ function App() {
   }
 
   const createListing = async () => {
-    const account = address ?? await connectWallet()
+    const account = await connectWallet()
     if (!selectedFile) throw new Error('Choose a file first')
     if (!window.swarm) throw new Error('Freedom Swarm provider not found')
 
@@ -657,7 +687,8 @@ function App() {
   }
 
   const copyReference = async (reference: string) => {
-    await navigator.clipboard.writeText(reference)
+    const listingUrl = `${window.location.origin}${window.location.pathname}#/listings/${encodeURIComponent(reference)}`
+    await copyText(listingUrl)
     await addActivity(makeActivity('file', 'Swarm hash copied', short(reference), { reference }), false)
   }
 
@@ -690,7 +721,7 @@ function App() {
   }
 
   const makeBid = async () => {
-    const account = address ?? await connectWallet()
+    const account = await connectWallet()
     if (route.name !== 'listing') throw new Error('Open a listing first')
     if (!listingMetadata || !listingDetails) throw new Error('Listing details are not loaded yet')
     setBusy('bid', 'Waiting for signature', `Bidding ${bidAmount} ETH on ${short(route.reference)}.`, 18)
@@ -718,6 +749,7 @@ function App() {
   }
 
   const fillBid = async (bid: BidLite) => {
+    await connectWallet()
     if (route.name !== 'listing' || !listingDetails) throw new Error('Open a listing first')
     setBusy('fill', 'Preparing DKey proof', `Encrypting key material for ${short(bid.pubKeyX)}.`, 12)
     try {
@@ -744,6 +776,7 @@ function App() {
   }
 
   const increaseBid = async (reference: string, chainId: number) => {
+    await connectWallet()
     const amount = increaseAmounts[reference] || DEFAULT_BID_AMOUNT
     setBusy('increase', 'Waiting for signature', `Increasing bid by ${amount} ETH.`, 18)
     try {
@@ -761,6 +794,7 @@ function App() {
   }
 
   const reclaimBid = async (reference: string, chainId: number) => {
+    await connectWallet()
     setBusy('reclaim', 'Waiting for signature', `Reclaiming bid for ${short(reference)}.`, 18)
     try {
       const result = await profile.reclaimBid(reference, chainId)
@@ -1120,7 +1154,13 @@ function App() {
       <section className="ledger">
         <div className="section-title">
           <h2>Activity</h2>
-          <span>{activity.length}</span>
+          <div className="section-actions">
+            <span>{activity.length}</span>
+            <button onClick={() => {
+              localStorage.removeItem(ACTIVITY_STORAGE_KEY)
+              setActivity([])
+            }}>Clear</button>
+          </div>
         </div>
         <div className="activity-list">
           {activity.slice(0, 18).map(item => (

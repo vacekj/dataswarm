@@ -10,7 +10,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@wagmi/core": "^3.4.9",
+    "@wagmi/core": "^2.22.1",
     "dkey-lib": "file:../dkey-lib",
     "ethers": "^6.16.0",
     "react": "^19.2.5",

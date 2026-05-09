@@ -251,6 +251,17 @@ progress {
   text-transform: uppercase;
 }
 
+.section-actions {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+}
+
+.section-actions button {
+  min-height: 28px;
+  padding: 0 8px;
+}
+
 .item-list {
   display: grid;
   gap: 1px;
