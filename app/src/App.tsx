@@ -764,11 +764,21 @@ function App() {
         listingDetails.chainId,
       )
       if (!result.success || !result.receipt) throw new Error(`fillBid failed: ${result.result}`)
-      commitProfile(result.profile ?? profile)
       await addActivity(makeActivity('chain', 'DKey provided', `${short(bid.pubKeyX)} received key material`, {
         txHash: result.receipt.transactionHash,
         reference: normalizeReference(route.reference),
       }))
+
+      const localBid = profile.myOpenBids[listingDetails.chainId]?.[normalizeReference(route.reference)]
+      if (localBid && localBid.pubKeyX === bid.pubKeyX) {
+        setBusy('dkey', 'Fetching received DKey', 'Finalizing the matching local bid into your DKey profile.', 86)
+        const dkeyResult = await profile.fetchDkey(localBid)
+        if (dkeyResult.success) {
+          await addActivity(makeActivity('chain', 'DKey fetched', short(route.reference), { reference: normalizeReference(route.reference) }))
+        }
+      }
+
+      commitProfile(result.profile ?? profile)
       await loadListing(route.reference)
     } finally {
       clearBusy()
@@ -813,8 +823,11 @@ function App() {
   const fetchDkeyForBid = async (reference: string, chainId: number) => {
     const bid = profile.myOpenBids[chainId]?.[reference]
     if (!bid) throw new Error('No local open bid for this listing')
-    setBusy('dkey', 'Fetching DKey', 'Scanning chain events for encrypted key material.', 18)
+    setBusy('dkey', 'Checking bid status', 'Looking for filled bid state on-chain.', 12)
     try {
+      const statusResult = await profile.checkIfDKeysReceived(chainId)
+      if (statusResult.success) commitProfile(statusResult.profile ?? profile)
+      setBusy('dkey', 'Fetching DKey', 'Scanning chain events for encrypted key material.', 42)
       const result = await profile.fetchDkey(bid)
       if (!result.success) throw new Error(`fetchDkey failed: ${result.result}`)
       commitProfile(result.profile ?? profile)
@@ -1026,7 +1039,7 @@ function App() {
                     <button onClick={() => run('Increase bid', () => increaseBid(reference, bid.chainId))}>Increase</button>
                     <button onClick={() => run('Reclaim bid', () => reclaimBid(reference, bid.chainId))}>Reclaim</button>
                     <button onClick={() => navigate(`/listings/${reference}`)}>View</button>
-                    {bid.isFilled && <button onClick={() => run('Fetch DKey', () => fetchDkeyForBid(reference, bid.chainId))}>Fetch DKey</button>}
+                    <button onClick={() => run('Fetch DKey', () => fetchDkeyForBid(reference, bid.chainId))}>Fetch DKey</button>
                   </div>
                 </article>
               ))}
