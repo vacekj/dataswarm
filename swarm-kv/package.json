@@ -1,0 +1,40 @@
+{
+  "name": "swarm-kv",
+  "version": "0.1.0",
+  "description": "Developer-friendly key-value store on Swarm (Feeds + manifest-style index), for Freedom browser or bee-js",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "swarm",
+    "ethereum-swarm",
+    "bee",
+    "feeds",
+    "key-value",
+    "decentralized-storage"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "@ethersphere/bee-js": "^12.1.0"
+  },
+  "devDependencies": {
+    "typescript": "~5.6.3"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

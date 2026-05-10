@@ -1,0 +1,59 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+ * Dark UI by default (single theme). All shadcn-style components use hsl(var(--*)).
+ * --app-nav-offset must clear the fixed AppNav (title + wrapped button row).
+ */
+@layer base {
+  :root {
+    color-scheme: dark;
+    /* Near-black shell */
+    --background: 0 0% 3%;
+    --foreground: 0 0% 96%;
+    --card: 240 5% 7%;
+    --card-foreground: 0 0% 96%;
+    --popover: 240 5% 8%;
+    --popover-foreground: 0 0% 96%;
+    --primary: 0 0% 98%;
+    --primary-foreground: 240 6% 8%;
+    --secondary: 240 4% 14%;
+    --secondary-foreground: 0 0% 96%;
+    --muted: 240 4% 16%;
+    --muted-foreground: 240 5% 55%;
+    --accent: 240 4% 18%;
+    --accent-foreground: 0 0% 96%;
+    --destructive: 0 62% 42%;
+    --destructive-foreground: 0 0% 98%;
+    --border: 240 4% 18%;
+    --input: 240 4% 16%;
+    --ring: 240 5% 45%;
+    --radius: 0.5rem;
+    /* Fixed single-row nav + optional notch / status bar */
+    --app-nav-offset: calc(env(safe-area-inset-top, 0px) + 5.75rem);
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  html {
+    @apply min-h-full bg-background text-foreground;
+  }
+
+  body {
+    @apply min-h-full bg-background text-foreground antialiased;
+    margin: 0;
+  }
+
+  #root {
+    @apply min-h-full bg-background;
+  }
+
+  progress {
+    @apply accent-primary;
+  }
+}
