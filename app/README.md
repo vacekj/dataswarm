@@ -1,73 +1,44 @@
-# React + TypeScript + Vite
+# DataSwarm app
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+This folder contains the static marketplace SPA for DataSwarm. It is a React + Vite app that talks to Freedom Browser for wallet and Swarm access, uses `dkey-lib` for the DKey marketplace contract flow, and uses the local `swarm-kv` package for encrypted profile backup.
 
-Currently, two official plugins are available:
+## Development
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+Build the local dependency first:
 
-## React Compiler
-
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-## Expanding the ESLint configuration
-
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
-
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
-
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```bash
+cd ../swarm-kv
+npm install
+npm run build
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+Then install and run the app:
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
-
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```bash
+cd ../app
+npm install
+npm run dev
 ```
+
+Open the printed localhost URL in Freedom Browser. The full app needs Freedom's injected `window.ethereum` and `window.swarm` providers.
+
+## Scripts
+
+```bash
+npm run dev      # local Vite server
+npm run build    # builds swarm-kv, type-checks, then emits the static site
+npm run lint     # ESLint
+npm run preview  # serves the production build locally
+```
+
+## Static hosting
+
+The app uses hash routes and a relative Vite base path. Production builds from `app/dist/` can be uploaded to Swarm without a server-side router.
+
+## Network
+
+The submission build targets Gnosis Chain:
+
+- Chain ID: `100`
+- Currency: `xDAI`
+- Marketplace calls: `dkey-lib`
